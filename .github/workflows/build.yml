@@ -18,7 +18,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          submodules: recursive
+          # Fork has relative submodule URLs (../rlottie.git) → bicharagay-eng/*; trees come from fetch step.
+          submodules: false
           fetch-depth: 0
 
       - name: Select Xcode
