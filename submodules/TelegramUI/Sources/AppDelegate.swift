@@ -559,13 +559,16 @@ private func extractAccountManagerState(records: AccountRecordsView<TelegramAcco
         
         let baseAppBundleId = Bundle.main.bundleIdentifier!
         let appGroupName = "group.\(baseAppBundleId)"
-        try! PasscodeEnvironment.shared.configure(PasscodeConfiguration(appGroupIdentifier: appGroupName, processRole: .mainApp, biometricKeychainService: walletBiometricKeychainService), privateAccessGroup: {
-            BuildConfig.keychainAccessGroup(baseAppBundleId: baseAppBundleId)
-        })
-        let maybeAppGroupUrl = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupName)
         
         let buildConfig = BuildConfig(baseAppBundleId: baseAppBundleId)
         self.buildConfig = buildConfig
+        // Unsigned / cloud-resigned IPAs lose App Group entitlement — skip lookup (avoids "client is not entitled").
+        let skipAppGroupProbe = buildConfig.isInternalBuild && !buildConfig.isAppStoreBuild
+        let maybeAppGroupUrl = skipAppGroupProbe ? nil : FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupName)
+        
+        try! PasscodeEnvironment.shared.configure(PasscodeConfiguration(appGroupIdentifier: appGroupName, processRole: .mainApp, biometricKeychainService: walletBiometricKeychainService), privateAccessGroup: {
+            BuildConfig.keychainAccessGroup(baseAppBundleId: baseAppBundleId)
+        })
         let signatureDict = BuildConfigExtra.signatureDict()
         
         let apiId: Int32 = buildConfig.apiId
