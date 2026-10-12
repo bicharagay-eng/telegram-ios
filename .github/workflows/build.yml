@@ -88,6 +88,7 @@ jobs:
             --configurationPath="build-system/ci-sideload-configuration.json" \
             --codesigningInformationPath=build-system/fake-codesigning \
             --configuration=release_arm64 \
+            --disableExtensions \
             --buildNumber="$BUILD_NUMBER" \
             --outputBuildArtifactsPath=build/artifacts
 

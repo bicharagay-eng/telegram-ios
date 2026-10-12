@@ -52,6 +52,7 @@ class BazelCommandLine:
         self.watch_api_hash = None
         self.watch_signing_identity = None
         self.watch_provisioning_profile = None
+        self.disable_extensions = False
 
         self.common_args = [
             # https://docs.bazel.build/versions/master/command-line-reference.html
@@ -143,6 +144,9 @@ class BazelCommandLine:
 
     def set_profile_swift(self, value):
         self.profile_swift = value
+
+    def set_disable_extensions(self, value=True):
+        self.disable_extensions = value
 
     def set_configuration(self, configuration):
         if configuration == 'debug_arm64':
@@ -301,6 +305,9 @@ class BazelCommandLine:
 
         if self.disable_provisioning_profiles:
             combined_arguments += ['--//Telegram:disableProvisioningProfiles']
+
+        if self.disable_extensions:
+            combined_arguments += ['--//Telegram:disableExtensions']
 
         combined_arguments += self.common_args
         combined_arguments += self.common_build_args
@@ -689,6 +696,9 @@ def build(bazel, arguments):
     bazel_command_line.set_profile_swift(arguments.profileSwift)
 
     bazel_command_line.set_split_swiftmodules(arguments.enableParallelSwiftmoduleGeneration)
+
+    if getattr(arguments, 'disableExtensions', False):
+        bazel_command_line.set_disable_extensions(True)
 
     bazel_command_line.invoke_build()
 
@@ -1092,6 +1102,12 @@ if __name__ == '__main__':
         action='store_true',
         default=False,
         help='Embed the tgwatch watch app (from the in-repo Telegram/WatchApp snapshot) under Watch/ in a device build.'
+    )
+    buildParser.add_argument(
+        '--disableExtensions',
+        action='store_true',
+        default=False,
+        help='Build only the main Telegram app (no Share/Widget/Notification extensions). Better for sideload and cloud resign.',
     )
     buildParser.add_argument(
         '--watchApiId',
