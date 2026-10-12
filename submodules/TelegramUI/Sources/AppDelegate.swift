@@ -685,8 +685,9 @@ private func extractAccountManagerState(records: AccountRecordsView<TelegramAcco
             networkEngineFactory: RustNetworkEngineFactory()
         )
         
-        guard let appGroupUrl = maybeAppGroupUrl else {
-            self.mainWindow?.presentNative(UIAlertController(title: nil, message: "Error 2", preferredStyle: .alert))
+        guard let appGroupUrl = self.resolveSharedContainerURL(appGroupName: appGroupName, preferredGroupUrl: maybeAppGroupUrl) else {
+            let message = "App Group unavailable (Error 2).\nExpected: \(appGroupName)\nCould not create fallback storage.\nReinstall the IPA with matching entitlements / provisioning profile."
+            self.presentStartupFailure(message: message)
             return true
         }
         
@@ -1382,11 +1383,8 @@ private func extractAccountManagerState(records: AccountRecordsView<TelegramAcco
             self.contextValue = context
             if let context = context {
                 setupLegacyComponents(context: context.context)
-                let isReady = context.isReady.get()
-                contextReadyDisposable.set((isReady
-                |> filter { $0 }
-                |> take(1)
-                |> deliverOnMainQueue).start(next: { _ in
+                let skipReadyGate = self.buildConfig?.isAppStoreBuild == false || self.buildConfig?.isInternalBuild == true
+                let applyContextUI = {
                     let readyTime = CFAbsoluteTimeGetCurrent() - startTime
                     if readyTime > 0.5 {
                         print("Application: context took \(readyTime) to become ready")
@@ -1394,16 +1392,22 @@ private func extractAccountManagerState(records: AccountRecordsView<TelegramAcco
                     print("Launch to ready took \((CFAbsoluteTimeGetCurrent() - launchStartTime) * 1000.0) ms")
 
                     self.mainWindow.debugAction = nil
-                    self.mainWindow.viewController = context.rootController
+                    self.attachRootController(context.rootController)
                     
                     if firstTime {
                         let layer = context.rootController.view.layer
-                        layer.allowsGroupOpacity = true
-                        layer.animateAlpha(from: 0.0, to: 1.0, duration: 0.2, completion: { [weak layer] _ in
-                            if let layer = layer {
-                                layer.allowsGroupOpacity = false
-                            }
-                        })
+                        layer.allowsGroupOpacity = false
+                        layer.opacity = 1.0
+                        if !skipReadyGate {
+                            layer.allowsGroupOpacity = true
+                            layer.opacity = 0.0
+                            layer.animateAlpha(from: 0.0, to: 1.0, duration: 0.2, completion: { [weak layer] _ in
+                                if let layer = layer {
+                                    layer.allowsGroupOpacity = false
+                                    layer.opacity = 1.0
+                                }
+                            })
+                        }
                     }
                     self.mainWindow.topLevelOverlayControllers = [context.sharedApplicationContext.overlayMediaController, context.notificationController]
                     (context.context.sharedContext as? SharedAccountContextImpl)?.notificationController = context.notificationController
@@ -1414,7 +1418,18 @@ private func extractAccountManagerState(records: AccountRecordsView<TelegramAcco
                     self.registerForNotifications(context: context.context, authorize: authorizeNotifications)
                     
                     self.resetIntentsIfNeeded(context: context.context)
-                }))
+                }
+                if skipReadyGate {
+                    applyContextUI()
+                } else {
+                    let isReady = context.isReady.get()
+                    contextReadyDisposable.set((isReady
+                    |> filter { $0 }
+                    |> take(1)
+                    |> deliverOnMainQueue).start(next: { _ in
+                        applyContextUI()
+                    }))
+                }
             } else {
                 self.mainWindow.viewController = nil
                 self.mainWindow.topLevelOverlayControllers = []
@@ -1461,6 +1476,7 @@ private func extractAccountManagerState(records: AccountRecordsView<TelegramAcco
             self.authContextValue = context
             if let context = context {
                 let presentationData = context.sharedContext.currentPresentationData.with({ $0 })
+                let skipReadyGate = self.buildConfig?.isAppStoreBuild == false || self.buildConfig?.isInternalBuild == true
                 
                 let progressSignal = Signal<Never, NoError> { [weak self] subscriber in
                     let statusController = OverlayStatusController(theme: presentationData.theme, type: .loading(cancelled: nil))
@@ -1473,21 +1489,48 @@ private func extractAccountManagerState(records: AccountRecordsView<TelegramAcco
                 }
                 |> runOn(Queue.mainQueue())
                 |> delay(0.5, queue: Queue.mainQueue())
-                let progressDisposable = progressSignal.start()
+                var progressDisposable: Disposable = EmptyDisposable
+                if !skipReadyGate {
+                    progressDisposable = progressSignal.start()
+                }
                 
-                let isReady: Signal<Bool, NoError> = context.isReady.get()
-                authContextReadyDisposable.set((isReady
-                |> filter { $0 }
-                |> take(1)
-                |> deliverOnMainQueue).start(next: { _ in
+                let applyAuthUI = {
                     progressDisposable.dispose()
-                    self.mainWindow.present(context.rootController, on: .root)
-                }))
+                    guard !context.authorizationCompleted else {
+                        return
+                    }
+                    self.bootstrapAuthUIIfNeeded(context)
+                    self.attachRootController(context.rootController)
+                }
+                
+                if skipReadyGate {
+                    applyAuthUI()
+                } else {
+                    let isReady: Signal<Bool, NoError> = context.isReady.get()
+                    authContextReadyDisposable.set((isReady
+                    |> filter { $0 }
+                    |> take(1)
+                    |> deliverOnMainQueue).start(next: { _ in
+                        applyAuthUI()
+                    }))
+                }
+                
+                Queue.mainQueue().after(5.0) { [weak self] in
+                    guard let self, self.rootUINeedsRecovery() else {
+                        return
+                    }
+                    applyAuthUI()
+                }
             } else {
                 authContextReadyDisposable.set(nil)
             }
         }))
 
+        for delay in [0.75, 2.0, 5.0, 10.0] {
+            Queue.mainQueue().after(delay) { [weak self] in
+                self?.recoverRootUIIfNeeded()
+            }
+        }
 
         let logoutDataSignal: Signal<(AccountManager, Set<PeerId>), NoError> = self.sharedContextPromise.get()
         |> take(1)
@@ -2119,6 +2162,7 @@ private func extractAccountManagerState(records: AccountRecordsView<TelegramAcco
         self.isActivePromise.set(true)
 
         self.resetBadge()
+        self.recoverRootUIIfNeeded()
         
         self.maybeCheckForUpdates()
         
@@ -3311,6 +3355,127 @@ private func extractAccountManagerState(records: AccountRecordsView<TelegramAcco
                 })
             }
         }).start()
+    }
+
+    private func sideloadContainerIsWritable(_ url: URL) -> Bool {
+        let probe = url.appendingPathComponent(".telegram_sideload_write_probe")
+        do {
+            try Data("ok".utf8).write(to: probe, options: .atomic)
+            try? FileManager.default.removeItem(at: probe)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private func resolveSharedContainerURL(appGroupName: String, preferredGroupUrl: URL?) -> URL? {
+        let pinnedKey = "telegram_pinned_container_path"
+        if let pinnedPath = UserDefaults.standard.string(forKey: pinnedKey), !pinnedPath.isEmpty {
+            let pinnedUrl = URL(fileURLWithPath: pinnedPath, isDirectory: true)
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: pinnedUrl.path, isDirectory: &isDirectory),
+               isDirectory.boolValue,
+               sideloadContainerIsWritable(pinnedUrl) {
+                return pinnedUrl
+            }
+            UserDefaults.standard.removeObject(forKey: pinnedKey)
+            Logger.shared.log("App \(self.episodeId)", "Dropped invalid container pin: \(pinnedPath)")
+        }
+        if let groupUrl = preferredGroupUrl, sideloadContainerIsWritable(groupUrl) {
+            UserDefaults.standard.set(groupUrl.path, forKey: pinnedKey)
+            return groupUrl
+        }
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+        guard let base else {
+            return nil
+        }
+        let fallbackDir = base.appendingPathComponent("telegram-sideload-data", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: fallbackDir, withIntermediateDirectories: true)
+        } catch {
+            Logger.shared.log("App \(self.episodeId)", "Fallback container create failed: \(error)")
+            return nil
+        }
+        UserDefaults.standard.set(fallbackDir.path, forKey: pinnedKey)
+        Logger.shared.log("App \(self.episodeId)", "App Group missing (\(appGroupName)); pinned sandbox fallback at \(fallbackDir.path)")
+        return fallbackDir
+    }
+
+    private func attachRootController(_ controller: ContainableController) {
+        self.mainWindow.hostView.containerView.backgroundColor = UIColor.systemBackground
+        self.mainWindow.viewController = controller
+        controller.view.layer.allowsGroupOpacity = false
+        controller.view.layer.opacity = 1.0
+        self.window?.makeKeyAndVisible()
+    }
+
+    private func presentStartupFailure(message: String) {
+        self.window?.makeKeyAndVisible()
+        let controller = UIViewController()
+        controller.view.backgroundColor = UIColor.systemBackground
+        let label = UILabel()
+        label.text = message
+        label.textColor = UIColor.label
+        label.numberOfLines = 0
+        label.textAlignment = .center
+        label.font = UIFont.systemFont(ofSize: 15, weight: .medium)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        controller.view.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: controller.view.safeAreaLayoutGuide.leadingAnchor, constant: 24),
+            label.trailingAnchor.constraint(equalTo: controller.view.safeAreaLayoutGuide.trailingAnchor, constant: -24),
+            label.centerYAnchor.constraint(equalTo: controller.view.safeAreaLayoutGuide.centerYAnchor),
+        ])
+        self.window?.rootViewController = controller
+        self.mainWindow?.presentNative(UIAlertController(title: "Startup failed", message: message, preferredStyle: .alert))
+    }
+
+    private func bootstrapAuthUIIfNeeded(_ context: UnauthorizedApplicationContext) {
+        guard !context.authorizationCompleted else {
+            return
+        }
+        guard context.rootController.viewControllers.isEmpty else {
+            return
+        }
+        let engine = TelegramEngineUnauthorized(account: context.account)
+        let countryCode = AuthorizationSequenceController.defaultCountryCode()
+        let _ = engine.auth.setState(state: UnauthorizedAccountState(
+            isTestingEnvironment: context.account.testingEnvironment,
+            masterDatacenterId: context.account.masterDatacenterId,
+            contents: .phoneEntry(countryCode: countryCode, number: "")
+        )).start()
+    }
+
+    private func rootUINeedsRecovery() -> Bool {
+        if self.mainWindow.viewController == nil {
+            return true
+        }
+        if let layer = self.mainWindow.viewController?.view.layer,
+           layer.opacity < 0.05 {
+            return true
+        }
+        if let auth = self.authContextValue,
+           !auth.authorizationCompleted,
+           self.mainWindow.viewController === auth.rootController,
+           auth.rootController.viewControllers.isEmpty {
+            return true
+        }
+        return false
+    }
+
+    private func recoverRootUIIfNeeded() {
+        if let auth = self.authContextValue, self.contextValue == nil {
+            if auth.authorizationCompleted {
+                return
+            }
+            self.bootstrapAuthUIIfNeeded(auth)
+            self.attachRootController(auth.rootController)
+            return
+        }
+        if let context = self.contextValue {
+            self.attachRootController(context.rootController)
+        }
     }
 }
 
