@@ -1,0 +1,55 @@
+# Codemagic — builds when GitHub macOS runners are stuck in queue.
+# Connect repo: https://codemagic.io/apps → Add application → GitHub → cursos1470-hash/telegram-ios
+workflows:
+  larpgram-unsigned-ipa:
+    name: Larpgram Telegram unsigned IPA
+    max_build_duration: 180
+    instance_type: mac_mini_m2
+    environment:
+      xcode: latest
+      vars:
+        BAZEL_USER_ROOT: /Users/builder/.cache/bazel-ci
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: main
+          include: true
+    scripts:
+      - name: Select Xcode and Metal
+        script: |
+          set -euo pipefail
+          XCODE_VERSION=$(python3 -c 'import json; print(json.load(open("versions.json"))["xcode"])')
+          for app in "/Applications/Xcode_${XCODE_VERSION}.app" /Applications/Xcode_26*.app; do
+            [[ -d "$app/Contents/Developer" ]] || continue
+            sudo xcode-select -s "$app/Contents/Developer"
+            break
+          done
+          xcodebuild -version
+          xcrun -sdk iphoneos metal --version || sudo xcodebuild -downloadComponent MetalToolchain || true
+      - name: Fetch external submodules
+        script: bash scripts/ci/fetch_external_submodules.sh "$CM_BUILD_DIR" master
+      - name: Fix permissions and codesigning
+        script: |
+          set -euo pipefail
+          bash scripts/ci/fix_executable_bits.sh "$CM_BUILD_DIR"
+          python3 scripts/ci/prepare_fake_codesigning.py
+      - name: Bazel build IPA
+        script: |
+          set -euo pipefail
+          cd "$CM_BUILD_DIR"
+          BUILD_NUMBER_OFFSET="$(cat build_number_offset)"
+          COMMIT_COUNT=$(git rev-list --count HEAD)
+          BUILD_NUMBER=$((COMMIT_COUNT + BUILD_NUMBER_OFFSET))
+          python3 build-system/Make/ImportCertificates.py --path build-system/fake-codesigning/certs
+          python3 -u build-system/Make/Make.py \
+            --bazelUserRoot="$BAZEL_USER_ROOT" \
+            build \
+            --configurationPath=build-system/ci-sideload-configuration.json \
+            --codesigningInformationPath=build-system/fake-codesigning \
+            --configuration=release_arm64 \
+            --buildNumber="$BUILD_NUMBER" \
+            --outputBuildArtifactsPath=build/artifacts
+          test -f build/artifacts/Telegram.ipa
+    artifacts:
+      - build/artifacts/Telegram.ipa

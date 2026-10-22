@@ -1,9 +1,17 @@
 name: CI
 
-# Manual only — avoids double macOS jobs (push + dispatch) and runner queue timeouts.
 on:
   workflow_dispatch:
+    inputs:
+      runner_label:
+        description: macOS runner pool (use macos-26 unless queue is bad; try macos-26-intel as second choice)
+        type: choice
+        default: macos-26
+        options:
+          - macos-26
+          - macos-26-intel
 
+# Do not stack queued jobs — only one CI at a time.
 concurrency:
   group: ci-${{ github.repository }}
   cancel-in-progress: true
@@ -14,11 +22,17 @@ env:
 
 jobs:
   build:
-    # Intel pool is usually faster to acquire than macos-26 arm64 (same Xcode 26 image family).
-    runs-on: macos-26-intel
-    timeout-minutes: 180
+    runs-on: ${{ inputs.runner_label }}
+    timeout-minutes: 360
 
     steps:
+      - name: Queue notice
+        shell: bash
+        run: |
+          echo "Runner label: ${{ inputs.runner_label }}"
+          echo "macOS arm64 queues can take 10-30 min at peak — do not cancel early."
+          echo "Alternative: connect this repo on https://codemagic.io (codemagic.yaml in repo root)."
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
