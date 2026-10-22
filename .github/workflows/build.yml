@@ -6,7 +6,7 @@ on:
 
 concurrency:
   group: ci-${{ github.repository }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   SOURCE_DIR: /Users/Shared/telegram-ios
@@ -14,7 +14,8 @@ env:
 
 jobs:
   build:
-    runs-on: macos-26
+    # Intel pool is usually faster to acquire than macos-26 arm64 (same Xcode 26 image family).
+    runs-on: macos-26-intel
     timeout-minutes: 180
 
     steps:

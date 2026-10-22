@@ -11,6 +11,12 @@ def is_apple_silicon():
         return False
 
 
+def bazel_release_sha256(versions):
+    if is_apple_silicon():
+        return versions.bazel_version_sha256
+    return versions.bazel_version_sha256_darwin_x86_64
+
+
 def get_clean_env(use_clean_env=True):
     clean_env = os.environ.copy()
     if use_clean_env:
@@ -161,6 +167,10 @@ class BuildEnvironmentVersions:
                 bazel_version, bazel_version_sha256 = configuration_dict['bazel'].split(':')
                 self.bazel_version = bazel_version
                 self.bazel_version_sha256 = bazel_version_sha256
+                self.bazel_version_sha256_darwin_x86_64 = configuration_dict.get(
+                    'bazel_darwin_x86_64_sha256',
+                    bazel_version_sha256,
+                )
             if configuration_dict['xcode'] is None:
                 raise Exception('Missing xcode version in {}'.format(configuration_path))
             else:

@@ -6,7 +6,7 @@ import tempfile
 import hashlib
 import shutil
 
-from BuildEnvironment import is_apple_silicon, resolve_executable, call_executable, run_executable_with_status, BuildEnvironmentVersions
+from BuildEnvironment import is_apple_silicon, bazel_release_sha256, resolve_executable, call_executable, run_executable_with_status, BuildEnvironmentVersions
 
 def transform_cache_host_into_http(grpc_url):
     parsed_url = urlparse(grpc_url)
@@ -68,12 +68,13 @@ def locate_bazel(base_path, cache_host_or_path, cache_dir):
         arch = 'darwin-x86_64'
     bazel_name = 'bazel-{version}-{arch}'.format(version=versions.bazel_version, arch=arch)
     bazel_path = '{}/build-input/{}'.format(base_path, bazel_name)
+    expected_sha256 = bazel_release_sha256(versions)
 
     resolved_cache_host = resolve_cache_host(cache_host_or_path)
     resolved_cache_path = resolve_cache_path(cache_host_or_path, cache_dir)
 
     if not os.path.isfile(bazel_path):
-        if resolved_cache_host is not None and versions.bazel_version_sha256 is not None:
+        if resolved_cache_host is not None and expected_sha256 is not None:
             http_cache_host = transform_cache_host_into_http(resolved_cache_host)
 
             with tempfile.NamedTemporaryFile(delete=True) as temp_output_file:
@@ -82,25 +83,25 @@ def locate_bazel(base_path, cache_host_or_path, cache_dir):
                     '-L',
                     '{cache_host}/cache/cas/{hash}'.format(
                         cache_host=http_cache_host,
-                        hash=versions.bazel_version_sha256
+                        hash=expected_sha256
                     ),
                     '--output',
                     temp_output_file.name
                 ], check_result=False)
                 test_sha256 = calculate_sha256(temp_output_file.name)
-                if test_sha256 == versions.bazel_version_sha256:
+                if test_sha256 == expected_sha256:
                     shutil.copyfile(temp_output_file.name, bazel_path)
         elif resolved_cache_path is not None:
-            (cache_cas_id, cache_cas_name_value) = cache_cas_name(versions.bazel_version_sha256)
+            (cache_cas_id, cache_cas_name_value) = cache_cas_name(expected_sha256)
             cached_path = '{}/cas/{}/{}'.format(resolved_cache_path, cache_cas_id, cache_cas_name_value)
             if os.path.isfile(cached_path):
                 shutil.copyfile(cached_path, bazel_path)
 
 
-    if os.path.isfile(bazel_path) and versions.bazel_version_sha256 is not None:
+    if os.path.isfile(bazel_path) and expected_sha256 is not None:
         test_sha256 = calculate_sha256(bazel_path)
-        if test_sha256 != versions.bazel_version_sha256:
-            print(f"Bazel at {bazel_path} does not match SHA256 {versions.bazel_version_sha256}, removing")
+        if test_sha256 != expected_sha256:
+            print(f"Bazel at {bazel_path} does not match SHA256 {expected_sha256}, removing")
             os.remove(bazel_path)
 
 
@@ -116,15 +117,15 @@ def locate_bazel(base_path, cache_host_or_path, cache_dir):
             bazel_path
         ])
 
-        if os.path.isfile(bazel_path) and versions.bazel_version_sha256 is not None:
+        if os.path.isfile(bazel_path) and expected_sha256 is not None:
             test_sha256 = calculate_sha256(bazel_path)
-            if test_sha256 != versions.bazel_version_sha256:
-                print(f"Bazel at {bazel_path} does not match SHA256 {versions.bazel_version_sha256}, removing")
+            if test_sha256 != expected_sha256:
+                print(f"Bazel at {bazel_path} does not match SHA256 {expected_sha256}, removing")
                 os.remove(bazel_path)
 
-        if resolved_cache_host is not None and versions.bazel_version_sha256 is not None:
+        if resolved_cache_host is not None and expected_sha256 is not None and os.path.isfile(bazel_path):
             http_cache_host = transform_cache_host_into_http(resolved_cache_host)
-            print(f"Uploading bazel@{versions.bazel_version_sha256} to bazel-remote")
+            print(f"Uploading bazel@{expected_sha256} to bazel-remote")
             call_executable([
                 'curl',
                 '-X',
@@ -133,14 +134,21 @@ def locate_bazel(base_path, cache_host_or_path, cache_dir):
                 bazel_path,
                 '{cache_host}/cache/cas/{hash}'.format(
                     cache_host=http_cache_host,
-                    hash=versions.bazel_version_sha256
+                    hash=expected_sha256
                 )
             ], check_result=False)
-        elif resolved_cache_path is not None:
-            (cache_cas_id, cache_cas_name_value) = cache_cas_name(versions.bazel_version_sha256)
+        elif resolved_cache_path is not None and os.path.isfile(bazel_path):
+            (cache_cas_id, cache_cas_name_value) = cache_cas_name(expected_sha256)
             cached_path = '{}/cas/{}/{}'.format(resolved_cache_path, cache_cas_id, cache_cas_name_value)
             os.makedirs(os.path.dirname(cached_path), exist_ok=True)
             shutil.copyfile(bazel_path, cached_path)
+
+    if not os.path.isfile(bazel_path):
+        raise FileNotFoundError(
+            'Could not download Bazel {} for {} (expected SHA256 {})'.format(
+                bazel_name, arch, expected_sha256
+            )
+        )
 
     if not os.access(bazel_path, os.X_OK):
         st = os.stat(bazel_path)
