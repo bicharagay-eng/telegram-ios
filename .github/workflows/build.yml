@@ -1,9 +1,12 @@
 name: CI
 
+# Manual only — avoids double macOS jobs (push + dispatch) and runner queue timeouts.
 on:
-  push:
-    branches: [main, master]
   workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.repository }}
+  cancel-in-progress: false
 
 env:
   SOURCE_DIR: /Users/Shared/telegram-ios
@@ -18,7 +21,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          submodules: recursive
+          submodules: false
           fetch-depth: 0
 
       - name: Select Xcode
@@ -34,11 +37,17 @@ jobs:
             if [[ -d "$candidate" ]]; then
               sudo xcode-select -s "$candidate"
               xcodebuild -version
+              echo "DEVELOPER_DIR=$(xcode-select -p)" >> "$GITHUB_ENV"
               exit 0
             fi
           done
           echo "::warning::Requested Xcode ${XCODE_VERSION} not found, using default"
           xcodebuild -version
+          echo "DEVELOPER_DIR=$(xcode-select -p)" >> "$GITHUB_ENV"
+
+      - name: Install Metal toolchain (Xcode 26)
+        shell: bash
+        run: bash scripts/ci/install_metal_toolchain.sh
 
       - name: Fetch external submodules
         shell: bash
